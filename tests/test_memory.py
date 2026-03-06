@@ -289,8 +289,10 @@ class TestMemoryManager:
         # 结束会话
         episode = await manager.end_session(session_id, extract_memory=True)
         
-        # 应该提取了记忆
-        assert episode is not None or True  # Mock模式可能不返回
+        # Mock模式下应该返回情景记忆
+        assert episode is not None
+        assert isinstance(episode.summary, str)
+        assert len(episode.summary) > 0
     
     def test_user_profile_management(self, manager):
         """测试用户画像管理"""

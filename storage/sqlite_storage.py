@@ -109,6 +109,9 @@ class SQLiteStorage:
         conn.row_factory = sqlite3.Row
         try:
             yield conn
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
     

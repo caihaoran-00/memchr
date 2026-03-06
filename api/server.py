@@ -3,6 +3,7 @@ FastAPI接口：提供HTTP API服务
 """
 import os
 import sys
+import threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI, HTTPException, Depends
@@ -24,14 +25,17 @@ app = FastAPI(
 
 # 全局记忆管理器
 _manager: Optional[MemoryManager] = None
+_manager_lock = threading.Lock()
 
 
 def get_manager() -> MemoryManager:
-    """获取记忆管理器实例"""
+    """获取记忆管理器实例（线程安全的懒加载单例）"""
     global _manager
     if _manager is None:
-        config = MemoryConfig()
-        _manager = MemoryManager(config)
+        with _manager_lock:
+            if _manager is None:
+                config = MemoryConfig()
+                _manager = MemoryManager(config)
     return _manager
 
 

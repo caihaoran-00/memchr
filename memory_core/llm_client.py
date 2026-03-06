@@ -80,7 +80,7 @@ class OpenAIClient(LLMClient):
             except Exception as e:
                 if attempt == self.max_retries - 1:
                     raise RuntimeError(f"LLM请求失败: {e}")
-                await asyncio.sleep(1 * (attempt + 1))  # 指数退避
+                await asyncio.sleep(2 ** attempt)  # 指数退避
         
         return ""
     
@@ -145,7 +145,7 @@ class MockLLMClient(LLMClient):
         result = {
             "summary": prompt[:100] if len(prompt) > 100 else prompt,
             "keywords": [],
-            "emotion": "neutral",
+            "emotion": "平静",
             "importance": 0.5,
             "facts": [],
             "profile_updates": {}
@@ -201,7 +201,7 @@ class ZhipuClient(LLMClient):
             except Exception as e:
                 if attempt == self.max_retries - 1:
                     raise RuntimeError(f"LLM请求失败: {e}")
-                await asyncio.sleep(1 * (attempt + 1))
+                await asyncio.sleep(2 ** attempt)  # 指数退避
         
         return ""
     

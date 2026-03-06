@@ -261,20 +261,23 @@ class RuleBasedExtractor:
     
     def _extract_keywords(self, text: str) -> List[str]:
         """提取关键词"""
-        # 简单的分词和频率统计
-        import jieba
-        words = jieba.cut(text)
-        
         # 停用词
         stopwords = {"的", "了", "是", "我", "你", "吗", "啊", "呢", "吧", "嘛", "哦", "呀"}
-        
+
+        try:
+            import jieba
+            words = jieba.cut(text)
+        except ImportError:
+            # jieba未安装，回退到简单的二元切分
+            words = [text[i:i+2] for i in range(0, len(text) - 1)] if len(text) >= 2 else []
+
         # 统计词频
         word_count = {}
         for word in words:
             word = word.strip()
             if len(word) >= 2 and word not in stopwords:
                 word_count[word] = word_count.get(word, 0) + 1
-        
+
         # 返回频率最高的关键词
         sorted_words = sorted(word_count.items(), key=lambda x: x[1], reverse=True)
         return [w for w, c in sorted_words[:5]]
