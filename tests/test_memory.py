@@ -26,6 +26,20 @@ from memory_core.models import (
 )
 
 
+class DummyLLMClient:
+    async def chat(self, messages, temperature=0.7, max_tokens=500):
+        return ""
+
+    async def extract_json(self, prompt, schema_hint=""):
+        return {}
+
+    async def embed_texts(self, texts):
+        return []
+
+    async def rerank(self, query, documents, top_n=None):
+        return []
+
+
 class TestModels:
     def test_message_serialization(self):
         message = Message(role=MessageRole.USER, content="hello")
@@ -217,7 +231,7 @@ class TestQwenClient:
 
 class TestExtractor:
     def test_fact_normalization_deduplicates_semantic_duplicates(self, temp_config):
-        extractor = MemoryExtractor(temp_config)
+        extractor = MemoryExtractor(temp_config, llm_client=DummyLLMClient())
         extraction = {
             "facts": [
                 {"subject": "小明", "predicate": "年龄", "object": "5岁", "confidence": 0.8},
