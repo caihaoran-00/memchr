@@ -19,6 +19,7 @@ classifiers = [
 
 dependencies = [
     "pydantic>=2.0.0",
+    "httpx>=0.24.0",
 ]
 
 [project.optional-dependencies]
@@ -27,7 +28,6 @@ api = [
     "uvicorn>=0.23.0",
 ]
 llm = [
-    "httpx>=0.24.0",
 ]
 nlp = [
     "jieba>=0.42.1",
