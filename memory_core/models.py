@@ -1,23 +1,21 @@
 """
-记忆数据模型定义
+记忆系统核心数据模型。
 """
+
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Dict, Optional, Any
 from enum import Enum
+from typing import Any, Dict, List, Optional
 import uuid
-import json
 
 
 class MemoryType(Enum):
-    """记忆类型"""
-    WORKING = "working"      # 工作记忆（当前对话）
-    EPISODIC = "episodic"    # 情景记忆（对话摘要/事件）
-    SEMANTIC = "semantic"    # 语义记忆（用户画像/知识）
+    WORKING = "working"
+    EPISODIC = "episodic"
+    SEMANTIC = "semantic"
 
 
 class MessageRole(Enum):
-    """消息角色"""
     USER = "user"
     ASSISTANT = "assistant"
     SYSTEM = "system"
@@ -25,94 +23,105 @@ class MessageRole(Enum):
 
 @dataclass
 class Message:
-    """单条对话消息"""
+    """单条对话消息。"""
+
     role: MessageRole
     content: str
     timestamp: datetime = field(default_factory=datetime.now)
     metadata: Dict[str, Any] = field(default_factory=dict)
-    
-    def to_dict(self) -> Dict:
+
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "role": self.role.value,
             "content": self.content,
             "timestamp": self.timestamp.isoformat(),
-            "metadata": self.metadata
+            "metadata": self.metadata,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict) -> "Message":
+    def from_dict(cls, data: Dict[str, Any]) -> "Message":
         return cls(
             role=MessageRole(data["role"]),
             content=data["content"],
             timestamp=datetime.fromisoformat(data["timestamp"]),
-            metadata=data.get("metadata", {})
+            metadata=data.get("metadata", {}),
         )
 
 
 @dataclass
 class WorkingMemory:
-    """工作记忆：当前对话上下文"""
+    """当前会话的工作记忆。"""
+
     user_id: str
     session_id: str
     messages: List[Message] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
-    
-    def add_message(self, role: MessageRole, content: str, metadata: Dict = None):
-        """添加消息"""
-        msg = Message(role=role, content=content, metadata=metadata or {})
-        self.messages.append(msg)
+
+    def add_message(
+        self, role: MessageRole, content: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
+        self.messages.append(
+            Message(role=role, content=content, metadata=metadata or {})
+        )
         self.updated_at = datetime.now()
-    
+
     def get_recent(self, n: int) -> List[Message]:
-        """获取最近n轮对话"""
-        return self.messages[-n*2:] if len(self.messages) > n*2 else self.messages
-    
-    def to_prompt_format(self) -> List[Dict]:
-        """转换为LLM prompt格式"""
-        return [{"role": m.role.value, "content": m.content} for m in self.messages]
-    
-    def to_dict(self) -> Dict:
+        if len(self.messages) <= n * 2:
+            return self.messages
+        return self.messages[-n * 2 :]
+
+    def to_prompt_format(self) -> List[Dict[str, str]]:
+        return [{"role": message.role.value, "content": message.content} for message in self.messages]
+
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "user_id": self.user_id,
             "session_id": self.session_id,
-            "messages": [m.to_dict() for m in self.messages],
+            "messages": [message.to_dict() for message in self.messages],
             "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat()
+            "updated_at": self.updated_at.isoformat(),
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "WorkingMemory":
+        return cls(
+            user_id=data["user_id"],
+            session_id=data["session_id"],
+            messages=[Message.from_dict(item) for item in data.get("messages", [])],
+            created_at=datetime.fromisoformat(data["created_at"]),
+            updated_at=datetime.fromisoformat(data["updated_at"]),
+        )
 
 
 @dataclass
 class Episode:
-    """情景记忆：对话摘要或重要事件"""
+    """会话压缩后的情景记忆。"""
+
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str = ""
-    summary: str = ""                        # 摘要内容
-    keywords: List[str] = field(default_factory=list)  # 关键词
-    emotion: str = ""                        # 情感标签
-    importance: float = 0.5                  # 重要性评分 0-1
-    access_count: int = 0                    # 访问次数
+    summary: str = ""
+    keywords: List[str] = field(default_factory=list)
+    emotion: str = ""
+    importance: float = 0.5
+    access_count: int = 0
     created_at: datetime = field(default_factory=datetime.now)
     last_accessed: datetime = field(default_factory=datetime.now)
-    source_session_id: str = ""              # 来源会话ID
+    source_session_id: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
-    
-    # 可选：向量表示
     embedding: Optional[List[float]] = None
-    
-    def update_access(self):
-        """更新访问记录"""
+
+    def update_access(self) -> None:
         self.access_count += 1
         self.last_accessed = datetime.now()
-    
+
     def calculate_strength(self, decay_days: int = 30) -> float:
-        """计算记忆强度（考虑时间衰减和访问频率）"""
-        days_passed = (datetime.now() - self.last_accessed).days
-        time_factor = max(0, 1 - days_passed / decay_days)
-        access_factor = min(1, self.access_count / 10)
+        days_passed = max((datetime.now() - self.last_accessed).days, 0)
+        time_factor = max(0.0, 1 - days_passed / decay_days)
+        access_factor = min(1.0, self.access_count / 10)
         return self.importance * (0.7 * time_factor + 0.3 * access_factor)
-    
-    def to_dict(self) -> Dict:
+
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
             "user_id": self.user_id,
@@ -124,11 +133,11 @@ class Episode:
             "created_at": self.created_at.isoformat(),
             "last_accessed": self.last_accessed.isoformat(),
             "source_session_id": self.source_session_id,
-            "metadata": self.metadata
+            "metadata": self.metadata,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict) -> "Episode":
+    def from_dict(cls, data: Dict[str, Any]) -> "Episode":
         return cls(
             id=data["id"],
             user_id=data["user_id"],
@@ -140,31 +149,31 @@ class Episode:
             created_at=datetime.fromisoformat(data["created_at"]),
             last_accessed=datetime.fromisoformat(data["last_accessed"]),
             source_session_id=data.get("source_session_id", ""),
-            metadata=data.get("metadata", {})
+            metadata=data.get("metadata", {}),
         )
 
 
 @dataclass
 class UserProfile:
-    """用户画像（语义记忆的一部分）"""
+    """用户画像。"""
+
     user_id: str
     name: str = ""
     age: Optional[int] = None
     gender: str = ""
-    tags: List[str] = field(default_factory=list)        # 兴趣/特征标签
-    preferences: Dict[str, Any] = field(default_factory=dict)  # 偏好设置
+    tags: List[str] = field(default_factory=list)
+    preferences: Dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
-    
-    def add_tag(self, tag: str, max_tags: int = 20):
-        """添加标签（去重，限制数量）"""
-        if tag not in self.tags:
+
+    def add_tag(self, tag: str, max_tags: int = 20) -> None:
+        if tag and tag not in self.tags:
             self.tags.append(tag)
             if len(self.tags) > max_tags:
                 self.tags = self.tags[-max_tags:]
             self.updated_at = datetime.now()
-    
-    def to_dict(self) -> Dict:
+
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "user_id": self.user_id,
             "name": self.name,
@@ -173,11 +182,11 @@ class UserProfile:
             "tags": self.tags,
             "preferences": self.preferences,
             "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat()
+            "updated_at": self.updated_at.isoformat(),
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict) -> "UserProfile":
+    def from_dict(cls, data: Dict[str, Any]) -> "UserProfile":
         return cls(
             user_id=data["user_id"],
             name=data.get("name", ""),
@@ -185,29 +194,33 @@ class UserProfile:
             gender=data.get("gender", ""),
             tags=data.get("tags", []),
             preferences=data.get("preferences", {}),
-            created_at=datetime.fromisoformat(data["created_at"]) if "created_at" in data else datetime.now(),
-            updated_at=datetime.fromisoformat(data["updated_at"]) if "updated_at" in data else datetime.now()
+            created_at=datetime.fromisoformat(data["created_at"])
+            if "created_at" in data
+            else datetime.now(),
+            updated_at=datetime.fromisoformat(data["updated_at"])
+            if "updated_at" in data
+            else datetime.now(),
         )
 
 
 @dataclass
 class Fact:
-    """知识事实（语义记忆的一部分）"""
+    """结构化事实。"""
+
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str = ""
-    subject: str = ""          # 主体 (如: "小明")
-    predicate: str = ""        # 谓词 (如: "喜欢")
-    object: str = ""           # 客体 (如: "恐龙")
-    confidence: float = 1.0    # 置信度
-    source: str = ""           # 来源（哪次对话提取的）
+    subject: str = ""
+    predicate: str = ""
+    object: str = ""
+    confidence: float = 1.0
+    source: str = ""
     created_at: datetime = field(default_factory=datetime.now)
     last_verified: datetime = field(default_factory=datetime.now)
-    
+
     def to_natural_language(self) -> str:
-        """转换为自然语言"""
         return f"{self.subject}{self.predicate}{self.object}"
-    
-    def to_dict(self) -> Dict:
+
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
             "user_id": self.user_id,
@@ -217,11 +230,11 @@ class Fact:
             "confidence": self.confidence,
             "source": self.source,
             "created_at": self.created_at.isoformat(),
-            "last_verified": self.last_verified.isoformat()
+            "last_verified": self.last_verified.isoformat(),
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict) -> "Fact":
+    def from_dict(cls, data: Dict[str, Any]) -> "Fact":
         return cls(
             id=data["id"],
             user_id=data["user_id"],
@@ -230,51 +243,58 @@ class Fact:
             object=data.get("object", ""),
             confidence=data.get("confidence", 1.0),
             source=data.get("source", ""),
-            created_at=datetime.fromisoformat(data["created_at"]) if "created_at" in data else datetime.now(),
-            last_verified=datetime.fromisoformat(data["last_verified"]) if "last_verified" in data else datetime.now()
+            created_at=datetime.fromisoformat(data["created_at"])
+            if "created_at" in data
+            else datetime.now(),
+            last_verified=datetime.fromisoformat(data["last_verified"])
+            if "last_verified" in data
+            else datetime.now(),
         )
 
 
-@dataclass  
+@dataclass
 class MemoryContext:
-    """记忆上下文：整合各类记忆供LLM使用"""
+    """上层模型使用的记忆上下文。"""
+
     working_memory: Optional[WorkingMemory] = None
     relevant_episodes: List[Episode] = field(default_factory=list)
     user_profile: Optional[UserProfile] = None
     relevant_facts: List[Fact] = field(default_factory=list)
-    
+
     def to_system_prompt(self) -> str:
-        """生成记忆增强的系统提示词"""
-        parts = []
-        
-        # 用户画像
+        parts: List[str] = []
+
         if self.user_profile:
-            profile_info = []
+            profile_lines: List[str] = []
             if self.user_profile.name:
-                profile_info.append(f"用户名字：{self.user_profile.name}")
-            if self.user_profile.age:
-                profile_info.append(f"年龄：{self.user_profile.age}岁")
+                profile_lines.append(f"用户名字：{self.user_profile.name}")
+            if self.user_profile.age is not None:
+                profile_lines.append(f"用户年龄：{self.user_profile.age}")
+            if self.user_profile.gender:
+                profile_lines.append(f"用户性别：{self.user_profile.gender}")
             if self.user_profile.tags:
-                profile_info.append(f"兴趣特征：{', '.join(self.user_profile.tags)}")
-            if profile_info:
-                parts.append("【用户信息】\n" + "\n".join(profile_info))
-        
-        # 相关知识
+                profile_lines.append(f"用户标签：{', '.join(self.user_profile.tags)}")
+            if self.user_profile.preferences:
+                profile_lines.append(f"用户偏好：{self.user_profile.preferences}")
+            if profile_lines:
+                parts.append("用户画像\n" + "\n".join(profile_lines))
+
         if self.relevant_facts:
-            facts_text = "\n".join([f"- {f.to_natural_language()}" for f in self.relevant_facts])
-            parts.append(f"【已知信息】\n{facts_text}")
-        
-        # 相关历史
+            fact_lines = [f"- {fact.to_natural_language()}" for fact in self.relevant_facts]
+            parts.append("相关事实\n" + "\n".join(fact_lines))
+
         if self.relevant_episodes:
-            episodes_text = "\n".join([f"- {e.summary}" for e in self.relevant_episodes[:3]])
-            parts.append(f"【相关记忆】\n{episodes_text}")
-        
-        return "\n\n".join(parts) if parts else ""
-    
-    def to_dict(self) -> Dict:
+            episode_lines = [f"- {episode.summary}" for episode in self.relevant_episodes[:3]]
+            parts.append("相关历史片段\n" + "\n".join(episode_lines))
+
+        return "\n\n".join(parts)
+
+    def to_dict(self) -> Dict[str, Any]:
         return {
-            "working_memory": self.working_memory.to_dict() if self.working_memory else None,
-            "relevant_episodes": [e.to_dict() for e in self.relevant_episodes],
+            "working_memory": self.working_memory.to_dict()
+            if self.working_memory
+            else None,
+            "relevant_episodes": [episode.to_dict() for episode in self.relevant_episodes],
             "user_profile": self.user_profile.to_dict() if self.user_profile else None,
-            "relevant_facts": [f.to_dict() for f in self.relevant_facts]
+            "relevant_facts": [fact.to_dict() for fact in self.relevant_facts],
         }
