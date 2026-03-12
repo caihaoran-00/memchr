@@ -1,367 +1,383 @@
 """
-记忆提取器：从对话中提取记忆信息
+记忆提取器。
 """
+
 import os
 import re
-from typing import List, Dict, Optional, Tuple
-from datetime import datetime
-
 import sys
+from datetime import datetime
+from typing import Dict, List, Optional
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from memory_core.models import (
-    Message, Episode, Fact, UserProfile, MessageRole
-)
-from memory_core.llm_client import LLMClient, create_llm_client
 from config import MemoryConfig
+from memory_core.llm_client import LLMClient, create_llm_client
+from memory_core.models import Episode, Fact, Message, MessageRole, UserProfile
 
 
-# 记忆提取的Prompt模板
-EXTRACTION_PROMPT = """请分析以下对话内容，提取关键记忆信息。
+EXTRACTION_PROMPT = """你是一个儿童对话记忆抽取助手，请从下面的对话里提取长期记忆。
 
 对话内容：
 {conversation}
 
-请以JSON格式返回，包含以下字段：
+请只返回 JSON，格式如下：
 {{
-    "summary": "对话的简短摘要（不超过100字）",
-    "keywords": ["关键词列表，3-5个"],
-    "emotion": "对话情感（开心/难过/生气/害怕/好奇/平静）",
-    "importance": 0.5,  // 重要性评分0-1，日常闲聊0.3，重要信息0.7以上
-    "facts": [  // 提取的事实信息
-        {{"subject": "主语", "predicate": "谓语", "object": "宾语"}}
-    ],
-    "profile_updates": {{  // 用户画像更新
-        "name": "用户名字（如果提到）",
-        "age": null,  // 年龄（如果提到）
-        "tags": ["新发现的兴趣/特征标签"]
+  "summary": "100-200字以内的情景摘要",
+  "keywords": ["关键词1", "关键词2", "关键词3"],
+  "emotion": "开心/平静/难过/害怕/生气/兴奋",
+  "importance": 0.0,
+  "facts": [
+    {{
+      "subject": "主体",
+      "predicate": "关系",
+      "object": "客体",
+      "confidence": 0.9
     }}
+  ],
+  "profile_updates": {{
+    "name": "名字或空字符串",
+    "age": null,
+    "gender": "",
+    "tags": ["稳定标签1", "稳定标签2"],
+    "preferences": {{
+      "favorite_topic": "偏好值"
+    }}
+  }}
 }}
 
-注意：
-1. 只提取明确提到的信息，不要推测
-2. facts中的三元组要简洁准确
-3. 儿童对话特别关注：喜好、害怕的事物、家庭成员、学校生活
-"""
+要求：
+1. `facts` 尽量抽取稳定、可复用的信息，不要留空；至少优先抽取名字、年龄、喜欢、害怕、偏好、常做活动。
+2. `summary` 保留这次对话里最值得记住的事件和偏好。
+3. `keywords` 控制在 3-5 个。
+4. `importance` 必须在 0 到 1 之间。
+5. 如果无法确认，不要编造。"""
 
 
 class MemoryExtractor:
-    """记忆提取器：从对话中提取结构化记忆"""
-    
-    def __init__(self, config: MemoryConfig, llm_client: LLMClient = None):
+    """使用 LLM 将对话抽取为 Episode、Fact 和 UserProfile。"""
+
+    def __init__(self, config: MemoryConfig, llm_client: Optional[LLMClient] = None):
         self.config = config
         self.llm = llm_client or create_llm_client(config)
-    
+
     async def extract_from_conversation(
-        self,
-        messages: List[Message],
-        user_id: str,
-        session_id: str = ""
+        self, messages: List[Message], user_id: str, session_id: str = ""
     ) -> Dict:
-        """从对话中提取记忆信息"""
-        
-        # 格式化对话内容
         conversation_text = self._format_conversation(messages)
-        
-        # 调用LLM提取
         prompt = EXTRACTION_PROMPT.format(conversation=conversation_text)
-        
         schema_hint = """
-期望的JSON结构：
-- summary: 字符串
-- keywords: 字符串数组
-- emotion: 字符串
-- importance: 0-1的浮点数
-- facts: 对象数组，每个对象有subject/predicate/object
-- profile_updates: 对象，包含name/age/tags
+- summary: string
+- keywords: list[string]
+- emotion: string
+- importance: float in [0, 1]
+- facts: list[{subject, predicate, object, confidence}]
+- profile_updates: {name, age, gender, tags, preferences}
 """
-        
         result = await self.llm.extract_json(prompt, schema_hint)
-        
-        # 验证和清理结果
-        return self._validate_extraction(result, user_id, session_id)
-    
-    def _format_conversation(self, messages: List[Message]) -> str:
-        """格式化对话为文本"""
-        lines = []
-        for msg in messages:
-            role = "用户" if msg.role == MessageRole.USER else "助手"
-            lines.append(f"{role}: {msg.content}")
-        return "\n".join(lines)
-    
-    def _validate_extraction(
-        self, 
-        result: Dict, 
-        user_id: str,
-        session_id: str
-    ) -> Dict:
-        """验证和清理提取结果"""
-        validated = {
-            "summary": result.get("summary", "")[:self.config.episode_summary_max_length],
-            "keywords": result.get("keywords", [])[:5],
-            "emotion": result.get("emotion", "平静"),
-            "importance": min(1.0, max(0.0, float(result.get("importance", 0.5)))),
-            "facts": [],
-            "profile_updates": {},
-            "user_id": user_id,
-            "session_id": session_id
-        }
-        
-        # 验证facts
-        for fact in result.get("facts", [])[:10]:
-            if isinstance(fact, dict) and all(k in fact for k in ["subject", "predicate", "object"]):
-                validated["facts"].append({
-                    "subject": str(fact["subject"])[:50],
-                    "predicate": str(fact["predicate"])[:30],
-                    "object": str(fact["object"])[:50]
-                })
-        
-        # 验证profile_updates
-        profile = result.get("profile_updates", {})
-        if isinstance(profile, dict):
-            if profile.get("name"):
-                validated["profile_updates"]["name"] = str(profile["name"])[:20]
-            if profile.get("age") is not None:
-                try:
-                    age = int(profile["age"])
-                    if 0 < age < 150:
-                        validated["profile_updates"]["age"] = age
-                except (ValueError, TypeError):
-                    pass
-            if profile.get("tags"):
-                validated["profile_updates"]["tags"] = [
-                    str(t)[:20] for t in profile["tags"][:5]
-                ]
-        
+        validated = self._validate_extraction(result, user_id, session_id)
+        validated["facts"] = self._backfill_facts(validated, messages)
         return validated
-    
-    def create_episode_from_extraction(
-        self,
-        extraction: Dict,
-        user_id: str,
-        session_id: str
+
+    async def create_episode_from_extraction(
+        self, extraction: Dict, user_id: str, session_id: str
     ) -> Episode:
-        """从提取结果创建情景记忆"""
-        return Episode(
+        episode = Episode(
             user_id=user_id,
             summary=extraction["summary"],
             keywords=extraction["keywords"],
             emotion=extraction["emotion"],
             importance=extraction["importance"],
             source_session_id=session_id,
-            metadata={"extraction_time": datetime.now().isoformat()}
+            metadata={"extraction_time": datetime.now().isoformat()},
         )
-    
+
+        if self.config.enable_vector_search and episode.summary:
+            embeddings = await self.llm.embed_texts([episode.summary])
+            if embeddings:
+                episode.embedding = embeddings[0]
+
+        return episode
+
     def create_facts_from_extraction(
-        self,
-        extraction: Dict,
-        user_id: str,
-        session_id: str
+        self, extraction: Dict, user_id: str, session_id: str
     ) -> List[Fact]:
-        """从提取结果创建知识事实"""
-        facts = []
+        facts: List[Fact] = []
         for fact_data in extraction.get("facts", []):
-            fact = Fact(
-                user_id=user_id,
-                subject=fact_data["subject"],
-                predicate=fact_data["predicate"],
-                object=fact_data["object"],
-                source=session_id
+            subject, predicate, obj = self._normalize_fact_triplet(
+                fact_data["subject"],
+                fact_data["predicate"],
+                fact_data["object"],
             )
-            facts.append(fact)
-        return facts
-    
+            facts.append(
+                Fact(
+                    user_id=user_id,
+                    subject=subject,
+                    predicate=predicate,
+                    object=obj,
+                    confidence=fact_data.get("confidence", 1.0),
+                    source=session_id,
+                )
+            )
+        return self._dedupe_fact_models(facts)
+
     def update_profile_from_extraction(
-        self,
-        profile: UserProfile,
-        extraction: Dict
+        self, profile: UserProfile, extraction: Dict
     ) -> UserProfile:
-        """根据提取结果更新用户画像"""
         updates = extraction.get("profile_updates", {})
-        
+
         if updates.get("name"):
             profile.name = updates["name"]
-        
         if updates.get("age") is not None:
             profile.age = updates["age"]
-        
+        if updates.get("gender"):
+            profile.gender = updates["gender"]
         for tag in updates.get("tags", []):
             profile.add_tag(tag, self.config.max_profile_tags)
-        
+        if updates.get("preferences"):
+            profile.preferences.update(updates["preferences"])
+
         profile.updated_at = datetime.now()
         return profile
 
+    def _format_conversation(self, messages: List[Message]) -> str:
+        lines = []
+        for message in messages:
+            if message.role == MessageRole.USER:
+                role = "用户"
+            elif message.role == MessageRole.ASSISTANT:
+                role = "助手"
+            else:
+                role = "系统"
+            lines.append(f"{role}: {message.content}")
+        return "\n".join(lines)
 
-class RuleBasedExtractor:
-    """基于规则的提取器：不调用LLM，成本为零"""
-    
-    # 情感关键词映射
-    EMOTION_KEYWORDS = {
-        "开心": ["开心", "高兴", "快乐", "好玩", "哈哈", "太好了", "喜欢", "爱"],
-        "难过": ["难过", "伤心", "哭", "不开心", "不想", "讨厌"],
-        "生气": ["生气", "气死", "烦", "讨厌", "不要"],
-        "害怕": ["害怕", "怕", "吓", "可怕", "恐怖"],
-        "好奇": ["为什么", "怎么", "是什么", "什么是", "?", "？"],
-    }
-    
-    # 事实提取模式
-    FACT_PATTERNS = [
-        (r"我叫(.+)", "我", "名字是", None),
-        (r"我(.+)岁", "我", "年龄是", None),
-        (r"我喜欢(.+)", "我", "喜欢", None),
-        (r"我不喜欢(.+)", "我", "不喜欢", None),
-        (r"我讨厌(.+)", "我", "讨厌", None),
-        (r"我想(.+)", "我", "想要", None),
-        (r"我有(.+)", "我", "拥有", None),
-        (r"我的(.+)是(.+)", "我的", None, None),  # 特殊处理
-        (r"(.+)是我的(.+)", None, "是我的", None),  # 特殊处理
-    ]
-    
-    def __init__(self, config: MemoryConfig):
-        self.config = config
-    
-    def extract_from_conversation(
-        self,
-        messages: List[Message],
-        user_id: str,
-        session_id: str = ""
-    ) -> Dict:
-        """基于规则从对话中提取信息"""
-        
-        # 合并所有用户消息
-        user_messages = [m.content for m in messages if m.role == MessageRole.USER]
-        full_text = " ".join(user_messages)
-        
-        result = {
-            "summary": self._generate_summary(messages),
-            "keywords": self._extract_keywords(full_text),
-            "emotion": self._detect_emotion(full_text),
-            "importance": self._calculate_importance(messages),
-            "facts": self._extract_facts(full_text),
-            "profile_updates": self._extract_profile(full_text),
+    def _validate_extraction(self, result: Dict, user_id: str, session_id: str) -> Dict:
+        validated = {
+            "summary": str(result.get("summary", ""))[
+                : self.config.episode_summary_max_length
+            ],
+            "keywords": [],
+            "emotion": str(result.get("emotion", "平静"))[:20],
+            "importance": 0.5,
+            "facts": [],
+            "profile_updates": {"tags": [], "preferences": {}},
             "user_id": user_id,
-            "session_id": session_id
+            "session_id": session_id,
         }
-        
-        return result
-    
-    def _generate_summary(self, messages: List[Message]) -> str:
-        """生成简单摘要"""
-        # 取第一条用户消息和最后一条用户消息
-        user_msgs = [m for m in messages if m.role == MessageRole.USER]
-        if not user_msgs:
-            return ""
-        
-        if len(user_msgs) == 1:
-            return user_msgs[0].content[:100]
-        
-        first = user_msgs[0].content[:40]
-        last = user_msgs[-1].content[:40]
-        return f"{first}...{last}"
-    
-    def _extract_keywords(self, text: str) -> List[str]:
-        """提取关键词"""
-        # 简单的分词和频率统计
-        import jieba
-        words = jieba.cut(text)
-        
-        # 停用词
-        stopwords = {"的", "了", "是", "我", "你", "吗", "啊", "呢", "吧", "嘛", "哦", "呀"}
-        
-        # 统计词频
-        word_count = {}
-        for word in words:
-            word = word.strip()
-            if len(word) >= 2 and word not in stopwords:
-                word_count[word] = word_count.get(word, 0) + 1
-        
-        # 返回频率最高的关键词
-        sorted_words = sorted(word_count.items(), key=lambda x: x[1], reverse=True)
-        return [w for w, c in sorted_words[:5]]
-    
-    def _detect_emotion(self, text: str) -> str:
-        """检测情感"""
-        for emotion, keywords in self.EMOTION_KEYWORDS.items():
-            for kw in keywords:
-                if kw in text:
-                    return emotion
-        return "平静"
-    
-    def _calculate_importance(self, messages: List[Message]) -> float:
-        """计算重要性"""
-        # 基于对话长度和关键信息
-        base_importance = 0.3
-        
-        # 对话轮数越多，可能越重要
-        if len(messages) > 6:
-            base_importance += 0.2
-        
-        # 检查是否包含重要信息
-        full_text = " ".join([m.content for m in messages])
-        important_keywords = ["名字", "生日", "喜欢", "害怕", "家", "学校", "朋友", "秘密"]
-        for kw in important_keywords:
-            if kw in full_text:
-                base_importance += 0.1
-        
-        return min(1.0, base_importance)
-    
-    def _extract_facts(self, text: str) -> List[Dict]:
-        """提取事实"""
-        facts = []
-        
-        for pattern, subject, predicate, _ in self.FACT_PATTERNS:
-            matches = re.findall(pattern, text)
-            for match in matches:
-                if isinstance(match, tuple):
-                    # 处理多个捕获组
-                    if len(match) >= 2:
-                        facts.append({
-                            "subject": subject or match[0],
-                            "predicate": predicate or "",
-                            "object": match[-1]
-                        })
-                else:
-                    facts.append({
-                        "subject": subject or "我",
-                        "predicate": predicate or "",
-                        "object": match
-                    })
-        
-        return facts[:10]  # 限制数量
-    
-    def _extract_profile(self, text: str) -> Dict:
-        """提取用户画像信息"""
-        profile = {}
-        
-        # 提取名字
-        name_match = re.search(r"我叫(.{1,10}?)(?:[，。,\s]|$)", text)
-        if name_match:
-            profile["name"] = name_match.group(1).strip()
-        
-        # 提取年龄
-        age_match = re.search(r"我(\d{1,2})岁", text)
-        if age_match:
-            profile["age"] = int(age_match.group(1))
-        
-        # 提取兴趣标签
-        tags = []
-        like_matches = re.findall(r"我喜欢(.{1,10}?)(?:[，。,\s]|$)", text)
-        for match in like_matches[:3]:
-            tags.append(f"喜欢{match.strip()}")
-        
-        if tags:
-            profile["tags"] = tags
-        
-        return profile
+
+        try:
+            validated["importance"] = min(
+                1.0, max(0.0, float(result.get("importance", 0.5)))
+            )
+        except (TypeError, ValueError):
+            validated["importance"] = 0.5
+
+        keywords = result.get("keywords", [])
+        if isinstance(keywords, list):
+            validated["keywords"] = [str(item)[:20] for item in keywords[:5] if item]
+
+        for fact in result.get("facts", [])[:10]:
+            if not isinstance(fact, dict):
+                continue
+            subject = str(fact.get("subject", "")).strip()[:50]
+            predicate = str(fact.get("predicate", "")).strip()[:30]
+            obj = str(fact.get("object", "")).strip()[:50]
+            if not subject or not predicate or not obj:
+                continue
+            try:
+                confidence = min(1.0, max(0.0, float(fact.get("confidence", 1.0))))
+            except (TypeError, ValueError):
+                confidence = 1.0
+            validated["facts"].append(
+                {
+                    "subject": subject,
+                    "predicate": predicate,
+                    "object": obj,
+                    "confidence": confidence,
+                }
+            )
+
+        profile = result.get("profile_updates", {})
+        if isinstance(profile, dict):
+            if profile.get("name"):
+                validated["profile_updates"]["name"] = str(profile["name"]).strip()[:20]
+            if profile.get("age") is not None:
+                try:
+                    age = int(profile["age"])
+                    if 0 < age < 150:
+                        validated["profile_updates"]["age"] = age
+                except (TypeError, ValueError):
+                    pass
+            if profile.get("gender"):
+                validated["profile_updates"]["gender"] = str(profile["gender"]).strip()[:10]
+            if isinstance(profile.get("tags"), list):
+                validated["profile_updates"]["tags"] = [
+                    str(tag).strip()[:20] for tag in profile["tags"][:5] if tag
+                ]
+            if isinstance(profile.get("preferences"), dict):
+                validated["profile_updates"]["preferences"] = profile["preferences"]
+
+        return validated
+
+    def _backfill_facts(self, extraction: Dict, messages: List[Message]) -> List[Dict]:
+        existing = extraction.get("facts", [])
+        dedup = {}
+        for fact in existing:
+            subject, predicate, obj = self._normalize_fact_triplet(
+                fact["subject"], fact["predicate"], fact["object"]
+            )
+            dedup[(subject, predicate, obj)] = {
+                "subject": subject,
+                "predicate": predicate,
+                "object": obj,
+                "confidence": fact.get("confidence", 1.0),
+            }
+
+        profile = extraction.get("profile_updates", {})
+        subject = profile.get("name") or "用户"
+
+        age = profile.get("age")
+        if age is not None:
+            dedup.setdefault(
+                (subject, "年龄", f"{age}岁"),
+                {"subject": subject, "predicate": "年龄", "object": f"{age}岁", "confidence": 0.85},
+            )
+
+        for tag in profile.get("tags", []):
+            parsed = self._fact_from_tag(subject, tag)
+            if parsed:
+                dedup.setdefault((parsed["subject"], parsed["predicate"], parsed["object"]), parsed)
+
+        preferences = profile.get("preferences", {})
+        for key, value in preferences.items():
+            text = str(value).strip()
+            if not text:
+                continue
+            predicate = "偏好"
+            if "favorite" in key.lower() or "topic" in key.lower():
+                predicate = "喜欢"
+            dedup.setdefault(
+                (subject, predicate, text),
+                {"subject": subject, "predicate": predicate, "object": text, "confidence": 0.8},
+            )
+
+        if not dedup:
+            for message in messages:
+                if message.role != MessageRole.USER:
+                    continue
+                for parsed in self._facts_from_user_text(message.content, subject):
+                    dedup.setdefault(
+                        (parsed["subject"], parsed["predicate"], parsed["object"]), parsed
+                    )
+
+        return list(dedup.values())[:10]
+
+    def _dedupe_fact_models(self, facts: List[Fact]) -> List[Fact]:
+        dedup: Dict[tuple[str, str, str], Fact] = {}
+        for fact in facts:
+            key = self._normalize_fact_triplet(fact.subject, fact.predicate, fact.object)
+            existing = dedup.get(key)
+            if not existing or fact.confidence > existing.confidence:
+                fact.subject, fact.predicate, fact.object = key
+                dedup[key] = fact
+        return list(dedup.values())
+
+    def _normalize_fact_triplet(
+        self, subject: str, predicate: str, obj: str
+    ) -> tuple[str, str, str]:
+        subject = self._normalize_fact_text(subject)
+        predicate = self._normalize_fact_text(predicate)
+        obj = self._normalize_fact_text(obj)
+
+        predicate_aliases = {
+            "名字": "名字是",
+            "名字是": "名字是",
+            "年龄": "年龄是",
+            "年龄是": "年龄是",
+        }
+        predicate = predicate_aliases.get(predicate, predicate)
+
+        if predicate in {"名字是", "年龄是"} and obj.startswith("是"):
+            obj = obj[1:].strip()
+
+        return subject, predicate, obj
+
+    def _normalize_fact_text(self, value: str) -> str:
+        return " ".join(str(value).strip().split())
+
+    def _fact_from_tag(self, subject: str, tag: str) -> Optional[Dict]:
+        tag = tag.strip()
+        if not tag:
+            return None
+        if tag.startswith("喜欢") and len(tag) > 2:
+            return {
+                "subject": subject,
+                "predicate": "喜欢",
+                "object": tag[2:],
+                "confidence": 0.82,
+            }
+        if tag.startswith("害怕") and len(tag) > 2:
+            return {
+                "subject": subject,
+                "predicate": "害怕",
+                "object": tag[2:],
+                "confidence": 0.82,
+            }
+        if tag.startswith("爱") and len(tag) > 1:
+            return {
+                "subject": subject,
+                "predicate": "喜欢",
+                "object": tag[1:],
+                "confidence": 0.75,
+            }
+        return None
+
+    def _facts_from_user_text(self, text: str, subject: str) -> List[Dict]:
+        facts: List[Dict] = []
+
+        patterns = [
+            (r"我叫([^\s，。！？,!?]{1,12})", "名字", 0.9),
+            (r"我今年?(\d{1,2})岁", "年龄", 0.9),
+            (r"我最喜欢([^，。！？,!?]{1,20})", "喜欢", 0.85),
+            (r"我喜欢([^，。！？,!?]{1,20})", "喜欢", 0.8),
+            (r"我害怕([^，。！？,!?]{1,20})", "害怕", 0.8),
+        ]
+
+        for pattern, predicate, confidence in patterns:
+            match = re.search(pattern, text)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if predicate == "名字":
+                facts.append(
+                    {
+                        "subject": subject,
+                        "predicate": "名字",
+                        "object": value,
+                        "confidence": confidence,
+                    }
+                )
+            elif predicate == "年龄":
+                facts.append(
+                    {
+                        "subject": subject,
+                        "predicate": "年龄",
+                        "object": f"{value}岁",
+                        "confidence": confidence,
+                    }
+                )
+            else:
+                facts.append(
+                    {
+                        "subject": subject,
+                        "predicate": predicate,
+                        "object": value,
+                        "confidence": confidence,
+                    }
+                )
+
+        return facts
 
 
-def create_extractor(
-    config: MemoryConfig, 
-    use_llm: bool = True,
-    llm_client: LLMClient = None
-):
-    """创建提取器"""
-    if use_llm and config.llm_provider != "mock":
-        return MemoryExtractor(config, llm_client)
-    else:
-        return RuleBasedExtractor(config)
+def create_extractor(config: MemoryConfig, llm_client: Optional[LLMClient] = None):
+    return MemoryExtractor(config, llm_client)
