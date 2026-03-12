@@ -11,7 +11,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import MemoryConfig, PROJECT_CONFIG_PATH
+from config import MemoryConfig, PROJECT_CONFIG_EXAMPLE_PATH, PROJECT_CONFIG_PATH
 from memory_core.extractor import MemoryExtractor
 from memory_core.llm_client import QwenClient, CompositeLLMClient, create_llm_client
 from memory_core.manager import MemoryManager
@@ -240,14 +240,19 @@ class TestConfig:
         assert config.conversation_turns_before_extraction == 3
 
     def test_project_settings_file_exists(self):
-        assert os.path.exists(PROJECT_CONFIG_PATH)
+        assert os.path.exists(PROJECT_CONFIG_EXAMPLE_PATH)
 
     def test_project_settings_json_is_valid(self):
-        with open(PROJECT_CONFIG_PATH, "r", encoding="utf-8") as file:
+        with open(PROJECT_CONFIG_EXAMPLE_PATH, "r", encoding="utf-8") as file:
             data = json.load(file)
         assert "llm_provider" in data
         assert "conversation_turns_before_extraction" in data
         assert "provider_api_keys" in data
+
+        # Optional: if a local private settings file exists, it should also be valid JSON.
+        if os.path.exists(PROJECT_CONFIG_PATH):
+            with open(PROJECT_CONFIG_PATH, "r", encoding="utf-8") as file:
+                json.load(file)
 
 
 class TestMemoryManager:

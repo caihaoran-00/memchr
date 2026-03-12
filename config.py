@@ -10,6 +10,7 @@ import os
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 PROJECT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "memory_settings.json")
+PROJECT_CONFIG_EXAMPLE_PATH = os.path.join(PROJECT_ROOT, "memory_settings.example.json")
 PROJECT_ENV_PATH = os.path.join(PROJECT_ROOT, ".env")
 
 
