@@ -10,6 +10,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.9", "3.10", "3.11"]
 
@@ -32,8 +33,9 @@ jobs:
 
       - name: Upload coverage (optional)
         if: matrix.python-version == '3.11'
+        continue-on-error: true
         run: |
-          pip install pytest-cov
+          python -m pip install pytest-cov
           pytest tests/ --cov=. --cov-report=xml || true
 
   lint:
